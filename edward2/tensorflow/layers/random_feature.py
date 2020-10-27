@@ -24,7 +24,7 @@ class RandomFeatureGaussianProcess(tf.keras.layers.Layer):
 
   During training, the model updates the maximum a posteriori (MAP) logits
   estimates and posterior precision matrix using minibatch statistics. During
-  inference, the model divides the MAP logit estiamtes by the predictive
+  inference, the model divides the MAP logit estimates by the predictive
   standard deviation, which is equivalent to approximating the posterior mean
   of the predictive probability via the mean-field approximation.
 
@@ -38,7 +38,7 @@ class RandomFeatureGaussianProcess(tf.keras.layers.Layer):
 
   Attributes:
     units: (int) The dimensionality of layer.
-    num_inducing: (iny) The number of random features for the approximation.
+    num_inducing: (int) The number of random features for the approximation.
     is_training: (tf.bool) Whether the layer is set in training mode. If so the
       layer updates the Gaussian process' variance estimate using statistics
       computed from the incoming minibatches.
@@ -61,6 +61,7 @@ class RandomFeatureGaussianProcess(tf.keras.layers.Layer):
                custom_random_features_initializer='random_normal',
                custom_random_features_activation=tf.math.cos,
                l2_regularization=0.,
+               disable_random_features=False,
                dtype=None,
                name='random_feature_gaussian_process',
                **gp_output_kwargs):
@@ -98,6 +99,8 @@ class RandomFeatureGaussianProcess(tf.keras.layers.Layer):
         kernel function.
       l2_regularization: (float) The strength of l2 regularization on the output
         weights.
+      disable_random_features: (bool) Disables random feature layer.
+      Hence, covariance matrix is computed over ordinary last-layer weights, excluding fixed-effects.
       dtype: (tf.DType) Input data type.
       name: (string) Layer name.
       **gp_output_kwargs: Additional keyword arguments to dense output layer.
@@ -108,6 +111,7 @@ class RandomFeatureGaussianProcess(tf.keras.layers.Layer):
     self.normalize_input = normalize_input
     self.scale_random_features = scale_random_features
     self.return_random_features = return_random_features
+    self.disable_random_features = disable_random_features
 
     # define module layers
     self._input_norm_layer = tf.keras.layers.LayerNormalization()
@@ -146,21 +150,28 @@ class RandomFeatureGaussianProcess(tf.keras.layers.Layer):
         trainable=gp_output_bias_trainable,
         name='gp_output_bias')
 
-  def call(self, inputs, global_step=None, training=None):
-    # define scaling factor
-    gp_feature_scale = tf.cast(tf.sqrt(2 / self.num_inducing), inputs.dtype)
-
+  def call(self, inputs, fixed_inputs=None, global_step=None, training=None):
     # compute random feature
     gp_inputs = inputs
     if self.normalize_input:
       gp_inputs = self._input_norm_layer(gp_inputs)
 
-    gp_feature = self._random_feature(gp_inputs)
-    if self.scale_random_features:
-      gp_feature = gp_feature * gp_feature_scale
+    if not self.disable_random_features:
+      # define scaling factor
+      gp_feature_scale = tf.cast(tf.sqrt(2 / self.num_inducing), inputs.dtype)
+
+      gp_feature = self._random_feature(gp_inputs)
+      if self.scale_random_features:
+        gp_feature = gp_feature * gp_feature_scale
 
     # compute posterior center (i.e., MAP estimate) and variance.
-    gp_output = self._gp_output_layer(gp_feature) + self._gp_output_bias
+    # Exclude last-layer fixed-effects fixed_inputs from covariance computation.
+    if fixed_inputs is not None:
+      gp_output = self._gp_output_layer(
+          tf.keras.layers.concatenate([gp_feature, fixed_inputs
+                                      ])) + self._gp_output_bias
+    else:
+      gp_output = self._gp_output_layer(gp_feature) + self._gp_output_bias
     gp_covmat = self._gp_cov_layer(gp_feature, training)
 
     if self.return_random_features:
